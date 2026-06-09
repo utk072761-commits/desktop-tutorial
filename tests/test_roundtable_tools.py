@@ -95,6 +95,24 @@ def test_mock_tool_loop_end_to_end():
     assert msg.agent_id == "A1"
 
 
+def test_tool_loop_populates_trace():
+    counter = {"n": 0}
+    tool = _search_tool(counter)
+    mock = MockAdapter("A1", tool_call="search", tool_args={"q": "架构"})
+    msg = run(run_tool_loop(mock, _ctx(), [tool]))
+    assert len(msg.tool_trace) == 1
+    entry = msg.tool_trace[0]
+    assert entry["name"] == "search"
+    assert entry["arguments"] == {"q": "架构"}
+    assert entry["result"] == "命中:架构" and entry["is_error"] is False
+
+
+def test_tool_loop_trace_records_unknown_tool_error():
+    mock = MockAdapter("A1", tool_call="ghost", tool_args={})
+    msg = run(run_tool_loop(mock, _ctx(), []))
+    assert msg.tool_trace and msg.tool_trace[0]["is_error"] is True
+
+
 def test_tool_loop_without_tools_is_plain_answer():
     counter = {"n": 0}
     # 未设 tool_call -> 即便给了工具也不调用,直接终稿。

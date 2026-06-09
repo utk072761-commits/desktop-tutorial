@@ -21,15 +21,21 @@ from ..adapters import MockAdapter
 from ..session import Roundtable
 from ..state import State
 from ..store import session_to_dict
+from ..tools import Tool
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def build_registry() -> dict:
-    """演示用三位舍人;A2/A3 第 2 轮起让步以演示收敛。"""
+def build_registry(use_tools: bool = False) -> dict:
+    """演示用三位舍人;A2/A3 第 2 轮起让步以演示收敛。
+
+    use_tools 时 A1 会在发言前先调一次 search 工具(其轨迹会在 UI 圆桌视窗呈现)。
+    """
+    a1_extra = {"tool_call": "search", "tool_args": {"q": "微服务运维成本"}} if use_tools else {}
     return {
         "A1": MockAdapter("A1", stance_seed="应采用单体架构，快速交付",
-                          arguments=["团队规模小，微服务运维成本高", "需求未稳定，边界易变"]),
+                          arguments=["团队规模小，微服务运维成本高", "需求未稳定，边界易变"],
+                          **a1_extra),
         "A2": MockAdapter("A2", stance_seed="应采用微服务，长期可扩展",
                           arguments=["未来流量增长确定", "团队需独立部署"],
                           concede_at=2, concede_to="A1"),
@@ -37,6 +43,20 @@ def build_registry() -> dict:
                           arguments=["保留拆分边界", "先验证再投入运维"],
                           concede_at=2, concede_to="A1"),
     }
+
+
+def demo_tools() -> list:
+    """演示工具:返回确定性的运维成本基准数据。"""
+    def search(args):
+        return f"基准数据：{args.get('q', '')} ≈ 3 人/月"
+
+    return [Tool(
+        name="search",
+        description="检索运维成本基准数据",
+        input_schema={"type": "object", "properties": {"q": {"type": "string"}},
+                      "required": ["q"]},
+        handler=search,
+    )]
 
 
 class RoundtableServer:
@@ -55,13 +75,14 @@ class RoundtableServer:
             "committed": self.committed,
         }
 
-    def start(self, prompt: str, debate: bool, n_max: int) -> dict:
-        self.rt = Roundtable("ui-session", build_registry())
+    def start(self, prompt: str, debate: bool, n_max: int, use_tools: bool = False) -> dict:
+        self.rt = Roundtable("ui-session", build_registry(use_tools))
         self.committed = []
+        tools = demo_tools() if use_tools else None
         if debate:
-            asyncio.run(self.rt.run_debate(prompt, n_max=n_max))
+            asyncio.run(self.rt.run_debate(prompt, n_max=n_max, tools=tools))
         else:
-            asyncio.run(self.rt.ask_single(prompt))
+            asyncio.run(self.rt.ask_single(prompt, tools=tools))
         return self.state_payload()
 
     def approve(self) -> dict:
@@ -116,7 +137,7 @@ def _make_handler(app: RoundtableServer):
             if self.path == "/api/start":
                 self._send_json(app.start(
                     data.get("prompt", ""), bool(data.get("debate", True)),
-                    int(data.get("n_max", 5))))
+                    int(data.get("n_max", 5)), bool(data.get("use_tools", False))))
             elif self.path == "/api/approve":
                 self._send_json(app.approve())
             elif self.path == "/api/reject":

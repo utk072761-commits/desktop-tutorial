@@ -31,6 +31,9 @@ class InternalMessage:
     content: str
     refs: List[str] = field(default_factory=list)
     round: int = 0
+    # tool_use 轨迹（本条发言前模型调用了哪些工具，供审计/UI 渲染）；
+    # 每项 {name, arguments, result, is_error}。普通发言为空。
+    tool_trace: List[Dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:

@@ -85,6 +85,7 @@ async def run_tool_loop(
     payload = adapter.with_tools(adapter.to_native(ctx), tools)
 
     native: Any = None
+    trace: List[Dict[str, Any]] = []  # 工具调用轨迹,挂到终稿 InternalMessage 上供 UI/审计
     for _ in range(max_iters):
         native = await adapter.call(payload)
         calls = adapter.parse_tool_calls(native)
@@ -95,10 +96,19 @@ async def run_tool_loop(
         for c in calls:
             tool = by_name.get(c.name)
             if tool is None:
-                results.append(ToolResult(c, f"未知工具: {c.name}", is_error=True))
+                res = ToolResult(c, f"未知工具: {c.name}", is_error=True)
             else:
-                results.append(await execute(tool, c))
+                res = await execute(tool, c)
+            results.append(res)
+            trace.append({
+                "name": c.name,
+                "arguments": c.arguments,
+                "result": res.content,
+                "is_error": res.is_error,
+            })
         payload = adapter.append_tool_round(payload, native, results)
 
     text = adapter.native_text(native) if native is not None else ""
-    return adapter.from_native({"payload": payload, "text": text})
+    msg = adapter.from_native({"payload": payload, "text": text})
+    msg.tool_trace = trace
+    return msg

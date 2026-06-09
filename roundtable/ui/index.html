@@ -26,6 +26,10 @@
          padding:10px 12px; margin-bottom:8px; }
   .msg .who { font-weight:600; color:var(--accent); }
   .msg .refs { font-size:12px; color:var(--muted); margin-top:4px; }
+  .tools { margin-top:6px; padding-top:6px; border-top:1px dashed var(--line); }
+  .tool { font-size:12px; color:#7fb3d5; }
+  .tool.err { color:var(--warn); }
+  .tool code { color:var(--muted); }
   .board .group { margin-bottom:16px; }
   .board .group h3 { font-size:12px; margin:0 0 6px; }
   .agree h3 { color:var(--ok); } .dispute h3 { color:var(--warn); } .unx h3 { color:var(--muted); }
@@ -70,6 +74,7 @@
     <input id="prompt" type="text" placeholder="议题，例如：架构选型 单体 vs 微服务？"
            value="架构选型：单体 vs 微服务？大家辩。">
     <label class="chk"><input type="checkbox" id="debate" checked> 辩论模式</label>
+    <label class="chk"><input type="checkbox" id="useTools"> 启用工具 (tool_use)</label>
     <button class="primary" onclick="start()">开始</button>
     <span style="flex-basis:100%;height:0"></span>
     <strong style="color:var(--muted);font-size:12px">行动控制台：</strong>
@@ -105,8 +110,14 @@ function render(d) {
       const items = byRound[r].map(m => {
         const refs = (m.refs && m.refs.length)
           ? `<div class="refs">↳ 反驳 @${m.refs.map(esc).join(', @')}</div>` : '';
+        const trace = (m.tool_trace && m.tool_trace.length)
+          ? `<div class="tools">${m.tool_trace.map(t => {
+              const args = esc(JSON.stringify(t.arguments));
+              const cls = t.is_error ? 'tool err' : 'tool';
+              return `<div class="${cls}">🔧 ${esc(t.name)}(<code>${args}</code>) → ${esc(t.result)}</div>`;
+            }).join('')}</div>` : '';
         const head = (m.content||'').split('\n')[0];
-        return `<div class="msg"><span class="who">${esc(m.agent_id)}</span>　${esc(head)}${refs}</div>`;
+        return `<div class="msg"><span class="who">${esc(m.agent_id)}</span>　${esc(head)}${trace}${refs}</div>`;
       }).join('');
       return `<div class="round"><div class="round-label">${label}</div>${items}</div>`;
     }).join('');
@@ -142,7 +153,8 @@ function render(d) {
 async function start() {
   const prompt = document.getElementById('prompt').value;
   const debate = document.getElementById('debate').checked;
-  render(await api('/api/start', {prompt, debate, n_max:5}));
+  const use_tools = document.getElementById('useTools').checked;
+  render(await api('/api/start', {prompt, debate, n_max:5, use_tools}));
 }
 async function act(kind, extra) { render(await api('/api/' + kind, extra||{})); }
 api('/api/state').then(render);

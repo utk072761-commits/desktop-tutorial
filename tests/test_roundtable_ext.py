@@ -189,6 +189,28 @@ def test_ui_server_full_flow():
     assert out["committed"]  # 副作用在 COMMITTED 之后执行
 
 
+def test_ui_server_surfaces_tool_trace():
+    app = RoundtableServer()
+    payload = app.start("微服务成本多高？", debate=False, n_max=5, use_tools=True)
+    msgs = payload["session"]["messages"]
+    a1 = next(m for m in msgs if m["agent_id"] == "A1")
+    assert a1["tool_trace"], "tool_trace 应出现在 UI 状态里供圆桌视窗渲染"
+    assert a1["tool_trace"][0]["name"] == "search"
+    assert "基准数据" in a1["tool_trace"][0]["result"]
+
+
+def test_tool_trace_survives_serialization():
+    from roundtable import MockAdapter, Roundtable
+    from roundtable.ui.server import demo_tools
+
+    reg = {"A1": MockAdapter("A1", tool_call="search", tool_args={"q": "x"})}
+    rt = Roundtable("trace-1", reg)
+    run(rt.ask_single("查", tools=demo_tools()))
+    s2 = session_from_dict(session_to_dict(rt.session))
+    a1 = next(m for m in s2.messages if m.agent_id == "A1")
+    assert a1.tool_trace and a1.tool_trace[0]["name"] == "search"
+
+
 def test_ui_server_single_mode():
     app = RoundtableServer()
     payload = app.start("@A1 给个方案", debate=False, n_max=5)

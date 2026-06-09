@@ -175,9 +175,11 @@ class MockAdapter(AgentAdapter):
             raise RuntimeError(f"{self.agent_id} provider 模拟故障")
         if self.latency:
             await asyncio.sleep(self.latency)
+        # 只要本轮提供了工具（payload 含 _tools 键）且尚未调过，就发起配置的调用；
+        # 不限定 tool_call 必须在工具表内——这样也能模拟「点了未注册工具」的分支。
         wants_tool = (
-            self.tool_call
-            and self.tool_call in payload.get("_tools", [])
+            self.tool_call is not None
+            and "_tools" in payload
             and not payload.get("_tool_done")
         )
         if wants_tool:
