@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>中书省 · 决策工作台</title>
+<style>
+  :root { --bg:#1b1c1f; --panel:#26282c; --line:#3a3d42; --ink:#e8e6e0;
+          --muted:#9aa0a6; --accent:#c8743f; --ok:#5a9e6f; --warn:#c25b5b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,Segoe UI,Roboto,"PingFang SC",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:16px; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  #stateBadge { margin-left:auto; padding:3px 12px; border-radius:12px; font-size:12px;
+                background:#33363b; border:1px solid var(--line); }
+  .layout { display:grid; grid-template-columns:1.4fr 1fr; gap:0; height:calc(100vh - 56px); }
+  .col { overflow:auto; padding:16px 20px; }
+  .col + .col { border-left:1px solid var(--line); }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+       margin:0 0 12px; }
+  .round { margin-bottom:18px; }
+  .round-label { font-size:12px; color:var(--muted); margin:0 0 8px; }
+  .msg { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         padding:10px 12px; margin-bottom:8px; }
+  .msg .who { font-weight:600; color:var(--accent); }
+  .msg .refs { font-size:12px; color:var(--muted); margin-top:4px; }
+  .board .group { margin-bottom:16px; }
+  .board .group h3 { font-size:12px; margin:0 0 6px; }
+  .agree h3 { color:var(--ok); } .dispute h3 { color:var(--warn); } .unx h3 { color:var(--muted); }
+  .dispute .topic { font-weight:600; margin:8px 0 4px; }
+  .dispute .pos { margin-left:12px; padding:6px 10px; border-left:2px solid var(--line);
+                  margin-bottom:6px; }
+  .dispute .case { color:var(--muted); font-size:13px; }
+  .empty { color:var(--muted); font-style:italic; }
+  .panel { padding:16px 20px; border-top:1px solid var(--line); }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input,button { font:inherit; }
+  input[type=text]{ flex:1; min-width:200px; padding:8px 10px; background:#16171a;
+        border:1px solid var(--line); border-radius:6px; color:var(--ink); }
+  label.chk { font-size:12px; color:var(--muted); }
+  button { padding:8px 14px; border-radius:6px; border:1px solid var(--line);
+           background:#2f3338; color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#1b1c1f; font-weight:600; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .commit { color:var(--ok); margin-top:8px; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>中书省 · 多智能体圆桌会议</h1>
+  <span id="stateBadge">WAITING</span>
+</header>
+
+<div class="layout">
+  <div class="col">
+    <h2>圆桌视窗 · Debate Floor</h2>
+    <div id="floor"><p class="empty">输入议题并开始辩论。</p></div>
+  </div>
+  <div class="col board">
+    <h2>决策摘要板 · Decision Board</h2>
+    <div id="board"><p class="empty">分歧矩阵将在裁判判定后呈现。</p></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="controls">
+    <input id="prompt" type="text" placeholder="议题，例如：架构选型 单体 vs 微服务？"
+           value="架构选型：单体 vs 微服务？大家辩。">
+    <label class="chk"><input type="checkbox" id="debate" checked> 辩论模式</label>
+    <button class="primary" onclick="start()">开始</button>
+    <span style="flex-basis:100%;height:0"></span>
+    <strong style="color:var(--muted);font-size:12px">行动控制台：</strong>
+    <button id="bApprove" onclick="act('approve')" disabled>通过决策</button>
+    <button id="bReject" onclick="act('reject',{reopen:true})" disabled>拒绝并重开</button>
+    <button id="bAbort" onclick="act('abort')">全局中断</button>
+  </div>
+  <div id="commit"></div>
+</div>
+
+<script>
+async function api(path, body) {
+  const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)} : {});
+  return r.json();
+}
+function esc(s){ return (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function render(d) {
+  document.getElementById('stateBadge').textContent = d.state;
+  const proposal = d.state === 'PROPOSAL';
+  document.getElementById('bApprove').disabled = !proposal;
+  document.getElementById('bReject').disabled = !proposal;
+
+  const floor = document.getElementById('floor');
+  const s = d.session;
+  if (!s || !s.messages.length) { floor.innerHTML = '<p class="empty">（无发言）</p>'; }
+  else {
+    const byRound = {};
+    s.messages.forEach(m => { (byRound[m.round] = byRound[m.round]||[]).push(m); });
+    floor.innerHTML = Object.keys(byRound).sort((a,b)=>a-b).map(r => {
+      const label = r === '0' ? '用户原始指令' : '第 ' + r + ' 轮';
+      const items = byRound[r].map(m => {
+        const refs = (m.refs && m.refs.length)
+          ? `<div class="refs">↳ 反驳 @${m.refs.map(esc).join(', @')}</div>` : '';
+        const head = (m.content||'').split('\n')[0];
+        return `<div class="msg"><span class="who">${esc(m.agent_id)}</span>　${esc(head)}${refs}</div>`;
+      }).join('');
+      return `<div class="round"><div class="round-label">${label}</div>${items}</div>`;
+    }).join('');
+  }
+
+  const board = document.getElementById('board');
+  const dm = s && s.dispute_matrix;
+  if (!dm) { board.innerHTML = '<p class="empty">分歧矩阵将在裁判判定后呈现。</p>'; }
+  else {
+    const agree = dm.agreement.length
+      ? dm.agreement.map(a=>`<div>✓ ${esc(a)}</div>`).join('') : '<div class="empty">（无）</div>';
+    const disp = dm.disputes.length ? dm.disputes.map(d => {
+      const pos = Object.keys(d.positions).map(aid =>
+        `<div class="pos"><b>${esc(aid)}</b>：${esc(d.positions[aid])}
+         <div class="case">最强论据：${esc((d.strongest_case||{})[aid]||'—')}</div></div>`).join('');
+      return `<div class="topic">◆ ${esc(d.topic)}</div>${pos}`;
+    }).join('') : '<div class="empty">（无）</div>';
+    const unx = dm.unexplored.length
+      ? dm.unexplored.map(u=>`<div>· ${esc(u)}</div>`).join('') : '<div class="empty">（无）</div>';
+    const v = s.verdict;
+    const vline = v ? `<p class="round-label">裁判：converged=${v.converged} · confidence=${v.confidence}</p>` : '';
+    board.innerHTML = vline +
+      `<div class="group agree"><h3>已一致</h3>${agree}</div>` +
+      `<div class="group dispute"><h3>分歧 · 各方最强论点对立</h3>${disp}</div>` +
+      `<div class="group unx"><h3>未探及</h3>${unx}</div>`;
+  }
+
+  const commit = document.getElementById('commit');
+  commit.innerHTML = (d.committed && d.committed.length)
+    ? d.committed.map(c=>`<div class="commit">✅ ${esc(c)}（副作用已在 COMMITTED 之后执行）</div>`).join('') : '';
+}
+
+async function start() {
+  const prompt = document.getElementById('prompt').value;
+  const debate = document.getElementById('debate').checked;
+  render(await api('/api/start', {prompt, debate, n_max:5}));
+}
+async function act(kind, extra) { render(await api('/api/' + kind, extra||{})); }
+api('/api/state').then(render);
+</script>
+</body>
+</html>

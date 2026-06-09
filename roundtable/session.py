@@ -8,6 +8,7 @@ Roundtable 把 dispatcher / moderator / judge / decision 串成一条
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set
 
@@ -84,6 +85,13 @@ class Roundtable:
         """全局中断：任何状态回 WAITING（§1）。"""
         self._fire(Transition.USER_ABORT)
 
+    async def _verdict(self, summaries: List[RoundSummary]) -> ConvergenceVerdict:
+        """调用裁判；兼容同步（heuristic Judge）与异步（LLMJudge）两种实现。"""
+        result = self.judge.verdict(summaries)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
     # ── 单问模式（DISPATCHING --single_mode--> WAITING）────────────────
     async def ask_single(self, prompt: str) -> List[InternalMessage]:
         """非辩论：直接展示答案，不进辩论流。"""
@@ -150,7 +158,7 @@ class Roundtable:
             self._fire(Transition.ROUND_END)
 
             # §4 外置裁判判定（不在 DISCUSSION 内部自评）。
-            verdict = self.judge.verdict(last_summaries)
+            verdict = await self._verdict(last_summaries)
             self.session.verdict = verdict
 
             if verdict.converged or self.moderator.turn_limit_reached(n):
@@ -162,7 +170,7 @@ class Roundtable:
 
         # 若因中断/熔断未走裁判，则补一次裁决供分歧矩阵使用。
         if self.session.verdict is None:
-            self.session.verdict = self.judge.verdict(last_summaries)
+            self.session.verdict = await self._verdict(last_summaries)
 
         self.session.dispute_matrix = build_dispute_matrix(
             self.session.verdict, last_summaries

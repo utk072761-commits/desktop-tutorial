@@ -12,8 +12,13 @@
 
 ```bash
 python run_roundtable.py            # 端到端演示：单问 -> 辩论收敛 -> 分歧矩阵 -> 终审
-pytest tests/test_roundtable.py -q  # 17 项单测，覆盖各核心不变量
+python -m roundtable.ui.server      # 决策工作台 UI（浏览器打开 http://127.0.0.1:8000）
+pytest tests/test_roundtable.py tests/test_roundtable_ext.py -q   # 31 项单测
 ```
+
+核心包零依赖。真实 provider 调用是可选项：`pip install anthropic httpx`
+（Claude 走官方 SDK，Gemini/Grok 走各自 REST/OpenAI 兼容端点）。不装也能跑通
+MockAdapter 驱动的全部演示与单测。
 
 ## 模块 ↔ 蓝图对照
 
@@ -21,12 +26,16 @@ pytest tests/test_roundtable.py -q  # 17 项单测，覆盖各核心不变量
 |------|---------|------|
 | `messages.py`   | §2.1 / §3.2 / §4 / §5 | 内部统一消息格式 + 各结构化数据类 |
 | `state.py`      | §1   | 闭合状态机（显式转换表，非法转换抛错，全局中断边） |
-| `adapters.py`   | §2.2 | Adapter 契约 + MockAdapter（真实 provider 在此扩展） |
+| `adapters.py`   | §2.2 | Adapter 契约 + MockAdapter |
+| `providers.py`  | §2.2 / §10.1 | 真实 ClaudeAdapter / GeminiAdapter / GrokAdapter（带版本标记 + 契约测试） |
 | `dispatcher.py` | §2.3 | `@` 点名解析与激活子集 |
 | `moderator.py`  | §3   | 并发调用（取代 mutex）+ context 压缩 + turn/token 双闸门 |
-| `judge.py`      | §4   | 外置一致性裁判（不参与辩论，只做收敛判定） |
+| `judge.py`      | §4   | 外置一致性裁判（确定性启发式） |
+| `llm.py`        | §4 / §3.2 / §10.2 | 真实轻量模型裁判 LLMJudge + 压缩 LLMCompressor（Claude 结构化输出，默认 Haiku） |
 | `decision.py`   | §5   | 分歧矩阵（各方最强论点对立，非共识摘要） |
 | `session.py`    | §1 / §6 / §8 | 会话状态存储 + 顶层编排器 + 协作协议 system prompt |
+| `store.py`      | §8   | 持久化（SQLite + Session ⇄ dict 序列化） |
+| `ui/`           | §7   | 决策工作台（圆桌视窗 / 决策板 / 行动控制台，stdlib 零依赖） |
 
 ## 守住的物理红线
 
@@ -37,9 +46,18 @@ pytest tests/test_roundtable.py -q  # 17 项单测，覆盖各核心不变量
 - **喂模型用 `summaries`，不用 `messages`**（§8）：全量发言只做审计/回放，
   下一轮 context 只传上一轮摘要 + 用户原始问题，避免 context 线性膨胀。
 
-## 尚未实现（骨架边界）
+## 已补齐的骨架边界
 
-- 真实三家 provider adapter（auth / tool_use / streaming 分帧）——见 §10.1 契约测试要求；
-- UI 三区（圆桌视窗 / 决策板 / 行动控制台），§7；
-- 持久化后端（当前为内存 `Session` 对象，§8 建议 SQLite/JSON 起步）；
-- 裁判/压缩改用真实轻量模型（当前为确定性启发式）。
+- ✅ 真实三家 provider adapter（`providers.py`）：auth、角色映射、streaming 分帧，
+  各带 `api_version` 版本标记，纯逻辑部分有契约测试（§10.1）。tool_use 暂未接入。
+- ✅ UI 三区（`ui/`）：圆桌视窗 / 决策板 / 行动控制台，与后端状态机绑定（§7）。
+- ✅ 持久化后端（`store.py`）：SQLite + JSON 友好序列化（§8）。
+- ✅ 裁判/压缩真实轻量模型路径（`llm.py`）：Claude 结构化输出，默认 `claude-haiku-4-5`；
+  `Roundtable` 同时兼容同步启发式裁判与异步 LLM 裁判。
+
+## 仍待真实环境验证
+
+- provider adapter 的 streaming 仅在合成数据上做了契约测试，未对活 API 跑过——
+  §10.1 要求接活后补端到端契约测试，provider 协议变更时 bump `api_version`。
+- tool_use（让模型调用工具）尚未纳入 adapter；
+- 并发与重试压力上来后，§8 建议把 SQLite 换成 Redis + 任务队列。

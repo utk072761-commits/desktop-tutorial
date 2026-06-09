@@ -1,0 +1,148 @@
+"""决策工作台后端(蓝图 §7)——零依赖 stdlib http.server。
+
+把 Roundtable 编排器接到三区 UI,并与后端状态机绑定:
+  - 圆桌视窗(Debate Floor):messages 按 round 分组、显示 refs 连线(§7.1)
+  - 决策摘要板(Decision Board):渲染 DisputeMatrix 三栏(§7.2)
+  - 行动控制台(Action Panel):介入/通过/拒绝/中断;通过是唯一触发副作用的边(§7.3)
+
+默认用 MockAdapter,故 `python -m roundtable.ui.server` 即可在浏览器里玩通全流程,
+无需任何 API key。接真实模型时把 build_registry 换成 providers.* 即可。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Dict, Optional
+
+from ..adapters import MockAdapter
+from ..session import Roundtable
+from ..state import State
+from ..store import session_to_dict
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def build_registry() -> dict:
+    """演示用三位舍人;A2/A3 第 2 轮起让步以演示收敛。"""
+    return {
+        "A1": MockAdapter("A1", stance_seed="应采用单体架构，快速交付",
+                          arguments=["团队规模小，微服务运维成本高", "需求未稳定，边界易变"]),
+        "A2": MockAdapter("A2", stance_seed="应采用微服务，长期可扩展",
+                          arguments=["未来流量增长确定", "团队需独立部署"],
+                          concede_at=2, concede_to="A1"),
+        "A3": MockAdapter("A3", stance_seed="折中：模块化单体起步",
+                          arguments=["保留拆分边界", "先验证再投入运维"],
+                          concede_at=2, concede_to="A1"),
+    }
+
+
+class RoundtableServer:
+    """持有一个活跃 Roundtable 会话,供 HTTP handler 驱动。"""
+
+    def __init__(self) -> None:
+        self.rt: Optional[Roundtable] = None
+        self.committed: list[str] = []
+
+    def state_payload(self) -> dict:
+        if self.rt is None:
+            return {"state": "WAITING", "session": None}
+        return {
+            "state": self.rt.session.state.value,
+            "session": session_to_dict(self.rt.session),
+            "committed": self.committed,
+        }
+
+    def start(self, prompt: str, debate: bool, n_max: int) -> dict:
+        self.rt = Roundtable("ui-session", build_registry())
+        self.committed = []
+        if debate:
+            asyncio.run(self.rt.run_debate(prompt, n_max=n_max))
+        else:
+            asyncio.run(self.rt.ask_single(prompt))
+        return self.state_payload()
+
+    def approve(self) -> dict:
+        if self.rt and self.rt.session.state == State.PROPOSAL:
+            # 副作用只能挂在 COMMITTED 之后(§7.3)。
+            self.rt.approve(side_effect=lambda: self.committed.append("决策已落地（示意写入）"))
+        return self.state_payload()
+
+    def reject(self, reopen: bool, new_instruction: bool) -> dict:
+        if self.rt and self.rt.session.state == State.PROPOSAL:
+            self.rt.reject(reopen=reopen, new_instruction=new_instruction)
+        return self.state_payload()
+
+    def abort(self) -> dict:
+        if self.rt:
+            self.rt.abort()
+        return self.state_payload()
+
+
+def _make_handler(app: RoundtableServer):
+    class Handler(BaseHTTPRequestHandler):
+        def _send_json(self, obj: dict, code: int = 200) -> None:
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _read_json(self) -> dict:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not length:
+                return {}
+            return json.loads(self.rfile.read(length) or b"{}")
+
+        def do_GET(self):  # noqa: N802
+            if self.path in ("/", "/index.html"):
+                with open(os.path.join(_HERE, "index.html"), "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/api/state":
+                self._send_json(app.state_payload())
+            else:
+                self.send_error(404)
+
+        def do_POST(self):  # noqa: N802
+            data = self._read_json()
+            if self.path == "/api/start":
+                self._send_json(app.start(
+                    data.get("prompt", ""), bool(data.get("debate", True)),
+                    int(data.get("n_max", 5))))
+            elif self.path == "/api/approve":
+                self._send_json(app.approve())
+            elif self.path == "/api/reject":
+                self._send_json(app.reject(
+                    bool(data.get("reopen", False)), bool(data.get("new_instruction", False))))
+            elif self.path == "/api/abort":
+                self._send_json(app.abort())
+            else:
+                self.send_error(404)
+
+        def log_message(self, *args):  # 静音默认访问日志
+            pass
+
+    return Handler
+
+
+def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
+    app = RoundtableServer()
+    httpd = ThreadingHTTPServer((host, port), _make_handler(app))
+    print(f"决策工作台已启动: http://{host}:{port}  (Ctrl-C 退出)")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已退出。")
+        httpd.server_close()
+
+
+if __name__ == "__main__":
+    serve()

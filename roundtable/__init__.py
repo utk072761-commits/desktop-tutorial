@@ -28,7 +28,10 @@ from .dispatcher import parse_mentions, resolve_active_set
 from .moderator import Moderator, TokenLedger, BudgetExceeded
 from .judge import Judge
 from .decision import build_dispute_matrix
-from .session import Session, Roundtable
+from .session import Session, Roundtable, SYSTEM_PROMPT
+from .providers import ClaudeAdapter, GeminiAdapter, GrokAdapter, PROVIDERS
+from .llm import LLMJudge, LLMCompressor, claude_judge, claude_compressor
+from .store import SessionStore, session_to_dict, session_from_dict
 
 __all__ = [
     "InternalMessage",
@@ -51,4 +54,16 @@ __all__ = [
     "build_dispute_matrix",
     "Session",
     "Roundtable",
+    "SYSTEM_PROMPT",
+    "ClaudeAdapter",
+    "GeminiAdapter",
+    "GrokAdapter",
+    "PROVIDERS",
+    "LLMJudge",
+    "LLMCompressor",
+    "claude_judge",
+    "claude_compressor",
+    "SessionStore",
+    "session_to_dict",
+    "session_from_dict",
 ]
