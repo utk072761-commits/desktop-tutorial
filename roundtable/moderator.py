@@ -14,6 +14,7 @@ from typing import Dict, List, Set, Tuple
 
 from .adapters import AgentAdapter
 from .messages import InternalMessage, RoundSummary
+from .tools import Tool, run_tool_loop
 
 
 class BudgetExceeded(Exception):
@@ -63,13 +64,16 @@ class Moderator:
         self,
         active: Set[str],
         ctx: List[InternalMessage],
+        tools: Optional[List[Tool]] = None,
     ) -> List[InternalMessage]:
         """并发生成一轮发言；单模型失败隔离为空缺，不拖垮整轮。
 
         返回值按固定座次排序，渲染层据此稳定布局（不随到达顺序跳动）。
+        若提供 tools 且某 adapter 支持 tool_use，则该位走 agentic 工具循环
+        （模型→工具调用→结果→终稿），否则走普通流式发言。
         """
         seats = [aid for aid in sorted(self.registry) if aid in active]
-        tasks = {aid: self.registry[aid].respond(ctx) for aid in seats}
+        tasks = {aid: self._respond(self.registry[aid], ctx, tools) for aid in seats}
 
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
         results: Dict[str, InternalMessage] = {}
@@ -83,6 +87,13 @@ class Moderator:
         msgs = [m for _, m in ordered]
         self._charge_round(msgs)
         return msgs
+
+    @staticmethod
+    def _respond(adapter, ctx, tools):
+        """单个 adapter 的本轮发言:有工具且支持则走工具循环,否则普通发言。"""
+        if tools and getattr(adapter, "supports_tools", False):
+            return run_tool_loop(adapter, ctx, tools)
+        return adapter.respond(ctx)
 
     # ── §3.2 Context 压缩层 ────────────────────────────────────────────
     def summarize_round(self, msgs: List[InternalMessage]) -> List[RoundSummary]:

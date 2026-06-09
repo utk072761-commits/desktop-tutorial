@@ -8,7 +8,7 @@
 
 import asyncio
 
-from roundtable import MockAdapter, Roundtable
+from roundtable import MockAdapter, Roundtable, Tool
 from roundtable.decision import render_board
 from roundtable.state import State
 
@@ -45,6 +45,28 @@ async def main() -> None:
     print()
     print(render_board(matrix))
     print(f"\n  当前状态(应为 PROPOSAL): {rt.session.state.value}")
+
+    print("\n########## tool_use：模型先调工具再作答（agentic 循环）##########")
+    calls = {"n": 0}
+
+    def search(args):
+        calls["n"] += 1
+        return f"运维成本基准：{args.get('q', '')} 约为 3 人/月"
+
+    tool = Tool(
+        name="search",
+        description="检索运维成本基准数据",
+        input_schema={"type": "object", "properties": {"q": {"type": "string"}},
+                      "required": ["q"]},
+        handler=search,
+    )
+    rt_tool = Roundtable("demo-tools", {
+        "A1": MockAdapter("A1", stance_seed="先查数据再下结论",
+                          tool_call="search", tool_args={"q": "微服务运维"}),
+    })
+    answers = await rt_tool.ask_single("微服务的运维成本到底多高？", tools=[tool])
+    print(f"  工具被调用 {calls['n']} 次")
+    print(f"  [A1] {answers[0].content.splitlines()[0]}")
 
     print("\n########## 终审：副作用只能挂在 COMMITTED 之后（§7.3）##########")
 

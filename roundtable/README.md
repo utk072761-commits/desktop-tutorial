@@ -13,7 +13,7 @@
 ```bash
 python run_roundtable.py            # 端到端演示：单问 -> 辩论收敛 -> 分歧矩阵 -> 终审
 python -m roundtable.ui.server      # 决策工作台 UI（浏览器打开 http://127.0.0.1:8000）
-pytest tests/test_roundtable.py tests/test_roundtable_ext.py -q   # 31 项单测
+pytest tests/ -q   # 44 项单测（核心 + 边界扩展 + tool_use）
 ```
 
 核心包零依赖。真实 provider 调用是可选项：`pip install anthropic httpx`
@@ -30,6 +30,7 @@ MockAdapter 驱动的全部演示与单测。
 | `providers.py`  | §2.2 / §10.1 | 真实 ClaudeAdapter / GeminiAdapter / GrokAdapter（带版本标记 + 契约测试） |
 | `dispatcher.py` | §2.3 | `@` 点名解析与激活子集 |
 | `moderator.py`  | §3   | 并发调用（取代 mutex）+ context 压缩 + turn/token 双闸门 |
+| `tools.py`      | §2.2 | tool_use:统一 Tool/ToolCall/ToolResult + provider 无关 agentic 循环 |
 | `judge.py`      | §4   | 外置一致性裁判（确定性启发式） |
 | `llm.py`        | §4 / §3.2 / §10.2 | 真实轻量模型裁判 LLMJudge + 压缩 LLMCompressor（Claude 结构化输出，默认 Haiku） |
 | `decision.py`   | §5   | 分歧矩阵（各方最强论点对立，非共识摘要） |
@@ -49,7 +50,12 @@ MockAdapter 驱动的全部演示与单测。
 ## 已补齐的骨架边界
 
 - ✅ 真实三家 provider adapter（`providers.py`）：auth、角色映射、streaming 分帧，
-  各带 `api_version` 版本标记，纯逻辑部分有契约测试（§10.1）。tool_use 暂未接入。
+  各带 `api_version` 版本标记，纯逻辑部分有契约测试（§10.1）。
+- ✅ tool_use（`tools.py`）：统一 `Tool/ToolCall/ToolResult` + provider 无关的 agentic
+  循环（模型→工具调用→结果→终稿，带往返硬上限）。三家工具协议
+  （Claude tool_use 块 / Gemini functionCall / OpenAI 兼容 tool_calls）封在各 adapter
+  的五个纯钩子里，逐一有契约测试；`Moderator.run_round` / `Session.ask_single` /
+  `run_debate` 都可传 `tools=[...]`，单模型工具失败/未知工具均隔离不炸整轮。
 - ✅ UI 三区（`ui/`）：圆桌视窗 / 决策板 / 行动控制台，与后端状态机绑定（§7）。
 - ✅ 持久化后端（`store.py`）：SQLite + JSON 友好序列化（§8）。
 - ✅ 裁判/压缩真实轻量模型路径（`llm.py`）：Claude 结构化输出，默认 `claude-haiku-4-5`；
@@ -57,7 +63,6 @@ MockAdapter 驱动的全部演示与单测。
 
 ## 仍待真实环境验证
 
-- provider adapter 的 streaming 仅在合成数据上做了契约测试，未对活 API 跑过——
-  §10.1 要求接活后补端到端契约测试，provider 协议变更时 bump `api_version`。
-- tool_use（让模型调用工具）尚未纳入 adapter；
+- provider adapter 的 streaming 与 tool_use 仅在合成数据上做了契约测试，未对活 API
+  跑过——§10.1 要求接活后补端到端契约测试，provider 协议变更时 bump `api_version`。
 - 并发与重试压力上来后，§8 建议把 SQLite 换成 Redis + 任务队列。

@@ -23,6 +23,7 @@ from typing import AsyncIterator, Dict, List
 from .adapters import AgentAdapter
 from .messages import InternalMessage
 from .session import SYSTEM_PROMPT
+from .tools import ToolCall
 
 
 def _role_for(agent_id: str, self_id: str) -> str:
@@ -43,6 +44,7 @@ def _label(msg: InternalMessage, self_id: str) -> str:
 class ClaudeAdapter(AgentAdapter):
     provider = "anthropic"
     api_version = "2023-06-01"
+    supports_tools = True
 
     def __init__(
         self,
@@ -95,6 +97,54 @@ class ClaudeAdapter(AgentAdapter):
             async for token in s.text_stream:
                 yield token
 
+    # ── tool_use:Claude tool_use / tool_result 块 ─────────────────────
+    def with_tools(self, payload: dict, tools: list) -> dict:
+        payload = dict(payload)
+        payload["tools"] = [
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+            for t in tools
+        ]
+        return payload
+
+    async def call(self, payload: dict) -> dict:
+        import anthropic  # 惰性导入
+
+        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        kwargs = {k: v for k, v in payload.items() if not k.startswith("_")}
+        msg = await client.messages.create(**kwargs)
+        return msg.model_dump()  # 归一化为 dict,使解析钩子可对合成 JSON 单测
+
+    def parse_tool_calls(self, native: dict) -> list:
+        return [
+            ToolCall(b["id"], b["name"], b.get("input") or {})
+            for b in native.get("content", [])
+            if b.get("type") == "tool_use"
+        ]
+
+    def native_text(self, native: dict) -> str:
+        return "".join(
+            b.get("text", "") for b in native.get("content", []) if b.get("type") == "text"
+        )
+
+    def append_tool_round(self, payload: dict, native: dict, results: list) -> dict:
+        payload = dict(payload)
+        messages = list(payload["messages"])
+        messages.append({"role": "assistant", "content": native.get("content", [])})
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": r.call.id,
+                    "content": r.content,
+                    "is_error": r.is_error,
+                }
+                for r in results
+            ],
+        })
+        payload["messages"] = messages
+        return payload
+
 
 # ════════════════════════════════════════════════════════════════════════
 # Gemini —— REST streamGenerateContent(SSE),避免猜 SDK 绑定
@@ -102,6 +152,7 @@ class ClaudeAdapter(AgentAdapter):
 class GeminiAdapter(AgentAdapter):
     provider = "google"
     api_version = "v1beta"
+    supports_tools = True
 
     def __init__(
         self,
@@ -170,6 +221,60 @@ class GeminiAdapter(AgentAdapter):
                     if text:
                         yield text
 
+    # ── tool_use:Gemini functionCall / functionResponse ───────────────
+    def with_tools(self, payload: dict, tools: list) -> dict:
+        payload = dict(payload)
+        payload["tools"] = [
+            {
+                "function_declarations": [
+                    {"name": t.name, "description": t.description, "parameters": t.input_schema}
+                    for t in tools
+                ]
+            }
+        ]
+        return payload
+
+    async def call(self, payload: dict) -> dict:
+        import httpx  # 惰性导入
+
+        body = {k: v for k, v in payload.items() if not k.startswith("_")}
+        url = (
+            f"https://generativelanguage.googleapis.com/{self.api_version}"
+            f"/models/{self.model}:generateContent"
+        )
+        async with httpx.AsyncClient(timeout=None) as client:
+            r = await client.post(url, params={"key": self.api_key}, json=body)
+            return r.json()
+
+    def parse_tool_calls(self, native: dict) -> list:
+        calls = []
+        for cand in native.get("candidates", []):
+            for i, part in enumerate(cand.get("content", {}).get("parts", [])):
+                fc = part.get("functionCall")
+                if fc:
+                    calls.append(ToolCall(f"{fc['name']}-{i}", fc["name"], fc.get("args") or {}))
+        return calls
+
+    def native_text(self, native: dict) -> str:
+        return self._extract_text(native)  # generateContent 与流式 chunk 同形
+
+    def append_tool_round(self, payload: dict, native: dict, results: list) -> dict:
+        payload = dict(payload)
+        contents = list(payload["contents"])
+        contents.append({
+            "role": "model",
+            "parts": [{"functionCall": {"name": r.call.name, "args": r.call.arguments}} for r in results],
+        })
+        contents.append({
+            "role": "user",
+            "parts": [
+                {"functionResponse": {"name": r.call.name, "response": {"result": r.content}}}
+                for r in results
+            ],
+        })
+        payload["contents"] = contents
+        return payload
+
 
 # ════════════════════════════════════════════════════════════════════════
 # Grok(xAI)—— OpenAI 兼容 /v1/chat/completions(SSE)
@@ -177,6 +282,7 @@ class GeminiAdapter(AgentAdapter):
 class GrokAdapter(AgentAdapter):
     provider = "xai"
     api_version = "v1"
+    supports_tools = True
 
     def __init__(
         self,
@@ -241,6 +347,59 @@ class GrokAdapter(AgentAdapter):
                     text = self._extract_text(json.loads(data))
                     if text:
                         yield text
+
+    # ── tool_use:OpenAI 兼容 tool_calls / role:tool ───────────────────
+    def with_tools(self, payload: dict, tools: list) -> dict:
+        payload = dict(payload)
+        payload["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
+            }
+            for t in tools
+        ]
+        payload["stream"] = False  # tool loop 走非流式
+        return payload
+
+    async def call(self, payload: dict) -> dict:
+        import httpx  # 惰性导入
+
+        body = {k: v for k, v in payload.items() if not k.startswith("_")}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        async with httpx.AsyncClient(timeout=None) as client:
+            r = await client.post(
+                f"{self.base_url}/chat/completions", headers=headers, json=body
+            )
+            return r.json()
+
+    def parse_tool_calls(self, native: dict) -> list:
+        msg = (native.get("choices") or [{}])[0].get("message", {})
+        calls = []
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            raw = fn.get("arguments", "{}")
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except json.JSONDecodeError:
+                args = {}
+            calls.append(ToolCall(tc.get("id") or fn.get("name", ""), fn.get("name", ""), args))
+        return calls
+
+    def native_text(self, native: dict) -> str:
+        return (native.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+
+    def append_tool_round(self, payload: dict, native: dict, results: list) -> dict:
+        payload = dict(payload)
+        messages = list(payload["messages"])
+        messages.append(native["choices"][0]["message"])  # 含 tool_calls 的 assistant 消息
+        for r in results:
+            messages.append({"role": "tool", "tool_call_id": r.call.id, "content": r.content})
+        payload["messages"] = messages
+        return payload
 
 
 # ── 统一 SSE 分帧 ───────────────────────────────────────────────────────

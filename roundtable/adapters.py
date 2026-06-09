@@ -23,6 +23,7 @@ class AgentAdapter(ABC):
     provider: str = "abstract"
     model: str = "abstract"
     api_version: str = "0"  # §10.1：版本标记，provider 协议变更时显式 bump
+    supports_tools: bool = False  # tool_use 钩子是否实现（见 tools.run_tool_loop）
 
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -50,6 +51,27 @@ class AgentAdapter(ABC):
             chunks.append(tok)
         return self.from_native({"payload": payload, "text": "".join(chunks)})
 
+    # ── tool_use 钩子（默认未实现；支持的 adapter 覆写并置 supports_tools=True）──
+    def with_tools(self, payload: dict, tools: list) -> dict:
+        """把工具声明注入请求 payload（provider 专属格式）。"""
+        raise NotImplementedError
+
+    async def call(self, payload: dict) -> dict:
+        """非流式调用一次，返回 provider 原生响应 dict（tool loop 用）。"""
+        raise NotImplementedError
+
+    def parse_tool_calls(self, native: dict) -> list:
+        """从 provider 响应抽工具调用，返回 list[ToolCall]。"""
+        raise NotImplementedError
+
+    def native_text(self, native: dict) -> str:
+        """从 provider 响应抽最终文本。"""
+        raise NotImplementedError
+
+    def append_tool_round(self, payload: dict, native: dict, results: list) -> dict:
+        """把模型的工具调用 + 工具结果追加进 payload，构造下一次请求。"""
+        raise NotImplementedError
+
 
 class MockAdapter(AgentAdapter):
     """确定性 mock：无需 API key，用于骨架端到端跑通与单测。
@@ -61,6 +83,7 @@ class MockAdapter(AgentAdapter):
 
     provider = "mock"
     api_version = "mock-1"
+    supports_tools = True
 
     def __init__(
         self,
@@ -71,6 +94,8 @@ class MockAdapter(AgentAdapter):
         concede_to: str | None = None,
         latency: float = 0.0,
         fail: bool = False,
+        tool_call: str | None = None,
+        tool_args: dict | None = None,
     ) -> None:
         super().__init__(agent_id)
         self.model = f"mock-{agent_id}"
@@ -79,6 +104,9 @@ class MockAdapter(AgentAdapter):
         self.concede_at = concede_at
         self.concede_to = concede_to
         self.latency = latency
+        # tool loop 模拟:若设了 tool_call,则在 loop 里先调一次该工具再给终稿。
+        self.tool_call = tool_call
+        self.tool_args = tool_args or {}
         self.fail = fail
 
     def to_native(self, msgs: List[InternalMessage]) -> dict:
@@ -126,10 +154,53 @@ class MockAdapter(AgentAdapter):
         rebut_prose = (
             f"@{rebuts[0]} 你的第 1 条论据在该场景下不成立。" if rebuts else ""
         )
-        body = f"{stance}。{rebut_prose}".strip()
+        note = payload.get("_results")
+        note_prose = f"（已查询工具：{note}）" if note else ""
+        body = f"{stance}。{note_prose}{rebut_prose}".strip()
         return (
             f"{body}\n"
             f"STANCE: {stance}\n"
             f"ARGS: {'; '.join(args)}\n"
             f"REBUTS: {rebut_line}"
         )
+
+    # ── tool_use 钩子（确定性模拟，离线可跑）──────────────────────────
+    def with_tools(self, payload: dict, tools: list) -> dict:
+        payload = dict(payload)
+        payload["_tools"] = [t.name for t in tools]
+        return payload
+
+    async def call(self, payload: dict) -> dict:
+        if self.fail:
+            raise RuntimeError(f"{self.agent_id} provider 模拟故障")
+        if self.latency:
+            await asyncio.sleep(self.latency)
+        wants_tool = (
+            self.tool_call
+            and self.tool_call in payload.get("_tools", [])
+            and not payload.get("_tool_done")
+        )
+        if wants_tool:
+            return {
+                "type": "tool_call",
+                "calls": [
+                    {"id": f"call-{self.agent_id}", "name": self.tool_call, "args": dict(self.tool_args)}
+                ],
+            }
+        return {"type": "text", "text": self._compose(payload)}
+
+    def parse_tool_calls(self, native: dict) -> list:
+        from .tools import ToolCall
+
+        if native.get("type") != "tool_call":
+            return []
+        return [ToolCall(c["id"], c["name"], c.get("args", {})) for c in native["calls"]]
+
+    def native_text(self, native: dict) -> str:
+        return native.get("text", "")
+
+    def append_tool_round(self, payload: dict, native: dict, results: list) -> dict:
+        payload = dict(payload)
+        payload["_tool_done"] = True
+        payload["_results"] = " | ".join(r.content for r in results)
+        return payload

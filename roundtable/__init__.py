@@ -26,6 +26,7 @@ from .state import State, Transition, StateMachine, IllegalTransition
 from .adapters import AgentAdapter, MockAdapter
 from .dispatcher import parse_mentions, resolve_active_set
 from .moderator import Moderator, TokenLedger, BudgetExceeded
+from .tools import Tool, ToolCall, ToolResult, run_tool_loop
 from .judge import Judge
 from .decision import build_dispute_matrix
 from .session import Session, Roundtable, SYSTEM_PROMPT
@@ -50,6 +51,10 @@ __all__ = [
     "Moderator",
     "TokenLedger",
     "BudgetExceeded",
+    "Tool",
+    "ToolCall",
+    "ToolResult",
+    "run_tool_loop",
     "Judge",
     "build_dispute_matrix",
     "Session",

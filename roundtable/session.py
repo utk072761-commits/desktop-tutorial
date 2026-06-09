@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set
+
+if TYPE_CHECKING:
+    from .tools import Tool
 
 from .adapters import AgentAdapter
 from .decision import build_dispute_matrix
@@ -93,8 +96,10 @@ class Roundtable:
         return result
 
     # ── 单问模式（DISPATCHING --single_mode--> WAITING）────────────────
-    async def ask_single(self, prompt: str) -> List[InternalMessage]:
-        """非辩论：直接展示答案，不进辩论流。"""
+    async def ask_single(
+        self, prompt: str, tools: Optional[List["Tool"]] = None
+    ) -> List[InternalMessage]:
+        """非辩论：直接展示答案，不进辩论流。可带 tools 让模型先调工具再作答。"""
         user_msg = InternalMessage(role="user", agent_id="user", content=prompt, round=0)
         self.session.messages.append(user_msg)
         self._fire(Transition.USER_INPUT)  # WAITING -> DISPATCHING
@@ -103,7 +108,7 @@ class Roundtable:
         active = resolve_active_set(prompt, self.registry)
         self.session.active_set = active
 
-        answers = await self.moderator.run_round(active, [user_msg])
+        answers = await self.moderator.run_round(active, [user_msg], tools=tools)
         self.session.messages.extend(answers)
         self._fire(Transition.SINGLE_MODE)  # DISPATCHING -> WAITING
         return answers
@@ -114,6 +119,7 @@ class Roundtable:
         prompt: str,
         n_max: Optional[int] = None,
         user_interrupt_after: Optional[int] = None,
+        tools: Optional[List["Tool"]] = None,
     ) -> DisputeMatrix:
         """跑完整辩论直到 PROPOSAL，返回分歧矩阵（决策板）。
 
@@ -140,7 +146,7 @@ class Roundtable:
             n = self.session.round_counter
 
             try:
-                msgs = await self.moderator.run_round(active, ctx)
+                msgs = await self.moderator.run_round(active, ctx, tools=tools)
             except BudgetExceeded:
                 # 全局熔断：直接截断进 PROPOSAL（§3.3）。
                 break
