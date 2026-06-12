@@ -1,0 +1,4 @@
+# 中书省圆桌系统——可选依赖（仅真实 provider 调用时需要）。
+# 核心包与全部演示/单测零依赖；不装以下包也能跑 MockAdapter。
+anthropic>=0.92.0   # ClaudeAdapter + llm.py 结构化输出裁判/压缩
+httpx>=0.27.0       # GeminiAdapter / GrokAdapter 的 SSE 流式 HTTP
