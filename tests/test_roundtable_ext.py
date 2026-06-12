@@ -176,6 +176,39 @@ def test_roundtable_with_async_llm_judge():
     assert rt.session.state == State.PROPOSAL
 
 
+# ── 流式回调 + 真实中断探针 ─────────────────────────────────────────────
+def test_on_token_streams_per_agent():
+    reg = {"A1": MockAdapter("A1", stance_seed="单体"), "A2": MockAdapter("A2", stance_seed="微服务")}
+    from roundtable import Moderator
+
+    received = {}
+
+    def on_token(aid, tok):
+        received[aid] = received.get(aid, "") + tok
+
+    mod = Moderator(reg)
+    user = InternalMessage(role="user", agent_id="user", content="辩", round=0)
+    msgs = run(mod.run_round({"A1", "A2"}, [user], on_token=on_token))
+    assert set(received) == {"A1", "A2"}
+    # 回调累积的内容与终稿一致（终稿做了 strip）。
+    for m in msgs:
+        assert received[m.agent_id].strip() == m.content
+
+
+def test_interrupt_probe_truncates_to_proposal():
+    from roundtable import Judge as _J, Roundtable as _R
+
+    reg = {"A1": MockAdapter("A1", stance_seed="单体"), "A2": MockAdapter("A2", stance_seed="微服务")}
+    rt = _R("probe-1", reg, judge=_J(agreement_threshold=0.99))  # 永不收敛
+    rounds_seen = []
+    run(rt.run_debate("辩到底", n_max=5,
+                      on_round=rounds_seen.append,
+                      interrupt=lambda: True))  # 第 1 轮结束即中断
+    assert rt.session.round_counter == 1
+    assert rounds_seen == [1]
+    assert rt.session.state == State.PROPOSAL
+
+
 # ── §7 UI 后端 ───────────────────────────────────────────────────────────
 def test_ui_server_full_flow():
     app = RoundtableServer()
@@ -223,6 +256,55 @@ def test_ui_server_reject_reopens():
     app.start("辩", debate=True, n_max=5)
     out = app.reject(reopen=True, new_instruction=False)
     assert out["state"] == "DISCUSSION"
+
+
+def test_ui_server_background_with_live_stream():
+    import time
+
+    app = RoundtableServer()
+    d = app.start("辩", debate=True, n_max=5, background=True, latency=0.3)
+    assert d["busy"] is True  # 立即返回,后台进行中
+
+    saw_live = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        d = app.state_payload()
+        if d["live"]:
+            saw_live = True
+        if not d["busy"]:
+            break
+        time.sleep(0.05)
+    assert saw_live, "辩论进行中应能观察到逐 token 流式缓冲"
+    assert d["busy"] is False and d["live"] == {}
+    assert d["state"] == "PROPOSAL"
+
+
+def test_ui_server_interrupt_endpoint():
+    import time
+
+    app = RoundtableServer()
+    app.start("辩", debate=True, n_max=5, background=True, latency=0.3)
+    app.interrupt()  # 第 1 轮结束后应截断进 PROPOSAL
+
+    deadline = time.time() + 10
+    while time.time() < deadline and app.busy:
+        time.sleep(0.05)
+    d = app.state_payload()
+    assert d["state"] == "PROPOSAL"
+    assert d["session"]["round_counter"] == 1  # 没辩满 5 轮就被介入截断
+
+
+def test_ui_server_abort_while_busy_routes_to_interrupt():
+    import time
+
+    app = RoundtableServer()
+    app.start("辩", debate=True, n_max=5, background=True, latency=0.3)
+    app.abort()  # busy 时 abort 走中断探针,轮边界优雅截断
+
+    deadline = time.time() + 10
+    while time.time() < deadline and app.busy:
+        time.sleep(0.05)
+    assert app.state_payload()["state"] == "PROPOSAL"
 
 
 if __name__ == "__main__":

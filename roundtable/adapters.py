@@ -40,15 +40,20 @@ class AgentAdapter(ABC):
     async def stream(self, payload: dict) -> AsyncIterator[str]:
         """统一的 token 流接口。"""
 
-    async def respond(self, msgs: List[InternalMessage]) -> InternalMessage:
+    async def respond(
+        self, msgs: List[InternalMessage], on_token=None
+    ) -> InternalMessage:
         """便捷封装：to_native -> stream 收集 -> from_native。
 
         Moderator 调用这一个方法即可，无需关心各 provider 的分帧差异。
+        on_token(agent_id, token) 在每个 token 到达时回调，供 UI 实时渲染。
         """
         payload = self.to_native(msgs)
         chunks: List[str] = []
         async for tok in self.stream(payload):
             chunks.append(tok)
+            if on_token is not None:
+                on_token(self.agent_id, tok)
         return self.from_native({"payload": payload, "text": "".join(chunks)})
 
     # ── tool_use 钩子（默认未实现；支持的 adapter 覆写并置 supports_tools=True）──
@@ -120,9 +125,12 @@ class MockAdapter(AgentAdapter):
     async def stream(self, payload: dict) -> AsyncIterator[str]:
         if self.fail:
             raise RuntimeError(f"{self.agent_id} provider 模拟故障")
-        if self.latency:
-            await asyncio.sleep(self.latency)
-        for tok in self._compose(payload).split(" "):
+        # latency 均摊到每个 token,模拟真实模型的逐 token 输出节奏。
+        toks = self._compose(payload).split(" ")
+        delay = self.latency / max(1, len(toks)) if self.latency else 0.0
+        for tok in toks:
+            if delay:
+                await asyncio.sleep(delay)
             yield tok + " "
 
     def from_native(self, resp: dict) -> InternalMessage:

@@ -30,6 +30,10 @@
   .tool { font-size:12px; color:#7fb3d5; }
   .tool.err { color:var(--warn); }
   .tool code { color:var(--muted); }
+  .msg.live { border-color:var(--accent); }
+  .cursor { color:var(--accent); animation:blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  #stateBadge.busy { border-color:var(--accent); color:var(--accent); }
   .board .group { margin-bottom:16px; }
   .board .group h3 { font-size:12px; margin:0 0 6px; }
   .agree h3 { color:var(--ok); } .dispute h3 { color:var(--warn); } .unx h3 { color:var(--muted); }
@@ -78,6 +82,7 @@
     <button class="primary" onclick="start()">开始</button>
     <span style="flex-basis:100%;height:0"></span>
     <strong style="color:var(--muted);font-size:12px">行动控制台：</strong>
+    <button id="bInterrupt" onclick="act('interrupt')" disabled>介入辩论</button>
     <button id="bApprove" onclick="act('approve')" disabled>通过决策</button>
     <button id="bReject" onclick="act('reject',{reopen:true})" disabled>拒绝并重开</button>
     <button id="bAbort" onclick="act('abort')">全局中断</button>
@@ -94,10 +99,13 @@ async function api(path, body) {
 function esc(s){ return (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 function render(d) {
-  document.getElementById('stateBadge').textContent = d.state;
-  const proposal = d.state === 'PROPOSAL';
+  const badge = document.getElementById('stateBadge');
+  badge.textContent = d.busy ? d.state + ' · 进行中' : d.state;
+  badge.classList.toggle('busy', !!d.busy);
+  const proposal = d.state === 'PROPOSAL' && !d.busy;
   document.getElementById('bApprove').disabled = !proposal;
   document.getElementById('bReject').disabled = !proposal;
+  document.getElementById('bInterrupt').disabled = !d.busy;
 
   const floor = document.getElementById('floor');
   const s = d.session;
@@ -121,6 +129,17 @@ function render(d) {
       }).join('');
       return `<div class="round"><div class="round-label">${label}</div>${items}</div>`;
     }).join('');
+  }
+
+  // 流式缓冲：辩论进行中实时呈现各方正在生成的发言（按固定座次排序）。
+  if (d.busy) {
+    const live = d.live || {};
+    const liveItems = Object.keys(live).sort().map(aid =>
+      `<div class="msg live"><span class="who">${esc(aid)}</span>　${esc(live[aid])}<span class="cursor">▌</span></div>`
+    ).join('');
+    floor.innerHTML += `<div class="round"><div class="round-label">进行中…</div>` +
+      (liveItems || '<p class="empty">模型生成中…</p>') + `</div>`;
+    floor.scrollTop = floor.scrollHeight;
   }
 
   const board = document.getElementById('board');
@@ -150,14 +169,28 @@ function render(d) {
     ? d.committed.map(c=>`<div class="commit">✅ ${esc(c)}（副作用已在 COMMITTED 之后执行）</div>`).join('') : '';
 }
 
+let pollTimer = null;
+function pollWhileBusy(d) {
+  if (d.busy && !pollTimer) {
+    pollTimer = setInterval(async () => {
+      const s = await api('/api/state');
+      render(s);
+      if (!s.busy) { clearInterval(pollTimer); pollTimer = null; }
+    }, 250);
+  }
+}
 async function start() {
   const prompt = document.getElementById('prompt').value;
   const debate = document.getElementById('debate').checked;
   const use_tools = document.getElementById('useTools').checked;
-  render(await api('/api/start', {prompt, debate, n_max:5, use_tools}));
+  const d = await api('/api/start', {prompt, debate, n_max:5, use_tools, background:true});
+  render(d); pollWhileBusy(d);
 }
-async function act(kind, extra) { render(await api('/api/' + kind, extra||{})); }
-api('/api/state').then(render);
+async function act(kind, extra) {
+  const d = await api('/api/' + kind, extra||{});
+  render(d); pollWhileBusy(d);
+}
+api('/api/state').then(d => { render(d); pollWhileBusy(d); });
 </script>
 </body>
 </html>

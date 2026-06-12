@@ -13,7 +13,7 @@
 ```bash
 python run_roundtable.py            # 端到端演示：单问 -> 辩论收敛 -> 分歧矩阵 -> 终审
 python -m roundtable.ui.server      # 决策工作台 UI（浏览器打开 http://127.0.0.1:8000）
-pytest tests/ -q   # 48 项单测（核心 + 边界扩展 + tool_use）
+pytest tests/ -q   # 53 项单测（核心 + 边界扩展 + tool_use + 流式/中断）
 ```
 
 核心包零依赖。真实 provider 调用是可选项：`pip install anthropic httpx`
@@ -36,7 +36,7 @@ MockAdapter 驱动的全部演示与单测。
 | `decision.py`   | §5   | 分歧矩阵（各方最强论点对立，非共识摘要） |
 | `session.py`    | §1 / §6 / §8 | 会话状态存储 + 顶层编排器 + 协作协议 system prompt |
 | `store.py`      | §8   | 持久化（SQLite + Session ⇄ dict 序列化） |
-| `ui/`           | §7   | 决策工作台（圆桌视窗 / 决策板 / 行动控制台 + tool_use 轨迹，stdlib 零依赖） |
+| `ui/`           | §7   | 决策工作台（圆桌视窗 / 决策板 / 行动控制台 + tool_use 轨迹 + 逐 token 实时渲染 + 介入辩论，stdlib 零依赖） |
 
 ## 守住的物理红线
 
@@ -62,6 +62,12 @@ MockAdapter 驱动的全部演示与单测。
 - ✅ 持久化后端（`store.py`）：SQLite + JSON 友好序列化（§8）。
 - ✅ 裁判/压缩真实轻量模型路径（`llm.py`）：Claude 结构化输出，默认 `claude-haiku-4-5`；
   `Roundtable` 同时兼容同步启发式裁判与异步 LLM 裁判。
+- ✅ 流式实时渲染 + 介入辩论（§3.1/§7.3）：`on_token` 逐 token 回调贯穿
+  adapter→moderator→session；UI 辩论转后台线程，前端轮询 `live` 缓冲实时呈现
+  各方生成中的发言（每轮落定即清空，最终仍按固定座次落座）；`run_debate`
+  新增 `interrupt` 探针——UI「介入辩论」按钮经此走真实的
+  DISCUSSION --user_interrupt--> PROPOSAL 边（busy 期间「全局中断」也路由到此，
+  避免与后台轮转换竞争）。
 
 ## 仍待真实环境验证
 

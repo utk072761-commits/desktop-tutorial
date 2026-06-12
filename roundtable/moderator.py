@@ -65,15 +65,18 @@ class Moderator:
         active: Set[str],
         ctx: List[InternalMessage],
         tools: Optional[List[Tool]] = None,
+        on_token=None,
     ) -> List[InternalMessage]:
         """并发生成一轮发言；单模型失败隔离为空缺，不拖垮整轮。
 
         返回值按固定座次排序，渲染层据此稳定布局（不随到达顺序跳动）。
         若提供 tools 且某 adapter 支持 tool_use，则该位走 agentic 工具循环
         （模型→工具调用→结果→终稿），否则走普通流式发言。
+        on_token(agent_id, token) 逐 token 回调（§3.1：后端并发、前端渲染分层——
+        UI 据此实时呈现，但最终落座仍按固定座次）。tool loop 为非流式，不回调。
         """
         seats = [aid for aid in sorted(self.registry) if aid in active]
-        tasks = {aid: self._respond(self.registry[aid], ctx, tools) for aid in seats}
+        tasks = {aid: self._respond(self.registry[aid], ctx, tools, on_token) for aid in seats}
 
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
         results: Dict[str, InternalMessage] = {}
@@ -89,11 +92,11 @@ class Moderator:
         return msgs
 
     @staticmethod
-    def _respond(adapter, ctx, tools):
+    def _respond(adapter, ctx, tools, on_token=None):
         """单个 adapter 的本轮发言:有工具且支持则走工具循环,否则普通发言。"""
         if tools and getattr(adapter, "supports_tools", False):
-            return run_tool_loop(adapter, ctx, tools)
-        return adapter.respond(ctx)
+            return run_tool_loop(adapter, ctx, tools)  # 工具循环非流式,无逐 token
+        return adapter.respond(ctx, on_token=on_token)
 
     # ── §3.2 Context 压缩层 ────────────────────────────────────────────
     def summarize_round(self, msgs: List[InternalMessage]) -> List[RoundSummary]:

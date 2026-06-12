@@ -97,7 +97,7 @@ class Roundtable:
 
     # ── 单问模式（DISPATCHING --single_mode--> WAITING）────────────────
     async def ask_single(
-        self, prompt: str, tools: Optional[List["Tool"]] = None
+        self, prompt: str, tools: Optional[List["Tool"]] = None, on_token=None
     ) -> List[InternalMessage]:
         """非辩论：直接展示答案，不进辩论流。可带 tools 让模型先调工具再作答。"""
         user_msg = InternalMessage(role="user", agent_id="user", content=prompt, round=0)
@@ -108,7 +108,9 @@ class Roundtable:
         active = resolve_active_set(prompt, self.registry)
         self.session.active_set = active
 
-        answers = await self.moderator.run_round(active, [user_msg], tools=tools)
+        answers = await self.moderator.run_round(
+            active, [user_msg], tools=tools, on_token=on_token
+        )
         self.session.messages.extend(answers)
         self._fire(Transition.SINGLE_MODE)  # DISPATCHING -> WAITING
         return answers
@@ -120,11 +122,18 @@ class Roundtable:
         n_max: Optional[int] = None,
         user_interrupt_after: Optional[int] = None,
         tools: Optional[List["Tool"]] = None,
+        on_token=None,
+        on_round: Optional[Callable[[int], None]] = None,
+        interrupt: Optional[Callable[[], bool]] = None,
     ) -> DisputeMatrix:
         """跑完整辩论直到 PROPOSAL，返回分歧矩阵（决策板）。
 
         user_interrupt_after: 测试/演示用——在第 k 轮后模拟用户中断，
         触发 DISCUSSION --user_interrupt--> PROPOSAL（强制截断）。
+        interrupt: 真实用户中断探针——每轮结束后查询，返回 True 即走同一条
+        user_interrupt 边（UI「介入辩论」按钮经此接入，§1/§7.3）。
+        on_token(agent_id, token): 逐 token 回调，供 UI 实时渲染。
+        on_round(n): 每轮发言落定后回调（UI 据此清空流式缓冲）。
         """
         if n_max is not None:
             self.moderator.n_max = n_max
@@ -146,7 +155,9 @@ class Roundtable:
             n = self.session.round_counter
 
             try:
-                msgs = await self.moderator.run_round(active, ctx, tools=tools)
+                msgs = await self.moderator.run_round(
+                    active, ctx, tools=tools, on_token=on_token
+                )
             except BudgetExceeded:
                 # 全局熔断：直接截断进 PROPOSAL（§3.3）。
                 break
@@ -154,9 +165,14 @@ class Roundtable:
             self.session.messages.extend(msgs)
             last_summaries = self.moderator.summarize_round(msgs)
             self.session.summaries.extend(last_summaries)
+            if on_round is not None:
+                on_round(n)
 
-            # 用户中断是全局边，强制截断当前进度进 PROPOSAL（§1）。
-            if user_interrupt_after is not None and n >= user_interrupt_after:
+            # 用户中断强制截断当前进度进 PROPOSAL（§1）：
+            # 模拟参数（测试用）与真实中断探针（UI 按钮）走同一条边。
+            if (user_interrupt_after is not None and n >= user_interrupt_after) or (
+                interrupt is not None and interrupt()
+            ):
                 self._fire(Transition.USER_INTERRUPT)  # DISCUSSION -> PROPOSAL
                 break
 
